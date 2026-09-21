@@ -4479,21 +4479,41 @@ function staffDataSummary(D,id){
 function monthLabel(mk){var p=mk.split('-');return p[0]+'年'+p[1]+'月';}
 
 /* ---------- 職員の削除 ---------- */
+/* 職員の削除：確認1回だけで実行する。
+   対象は氏名や並び順ではなく固定の職員IDで特定し、書き込みは従来どおり
+   runStorageTransaction（書込後に読み直して照合・失敗時は巻き戻し）を使う。
+   ほかの職員の勤務・希望休・ロック・勤務先が変わっていないことも従来どおり検証する。 */
 function openStaffDeletePanel(id){
-  var panel=document.getElementById('staffOpPanel');
   var snap=readShiftToolStorage(),D;
   try{D=parseIdData(snap.values);}catch(e){alert('保存データを読み取れないため削除できません');return;}
   var target=D.staff.staff.filter(function(s){return s.id===id;})[0];
   if(!target){alert('対象の職員が見つかりません');return;}
-  staffDelState={id:id,preBackup:null,done:false,resultHtml:'',summary:staffDataSummary(D,id),shortages:staffDeleteShortages(D,target),
-    label:target.name,unit:target.unit,sameName:D.staff.staff.filter(function(s){return s.name===target.name;}).length};
-  renderStaffDeletePanel();
-  if(panel&&panel.scrollIntoView) panel.scrollIntoView();
+  var sm=staffDataSummary(D,id);
+  var shortages=staffDeleteShortages(D,target);
+  var sameName=D.staff.staff.filter(function(s){return s.name===target.name;}).length;
+  var lines=[];
+  if(sm.shiftMonths.length) lines.push('・勤務表：'+sm.shiftMonths.map(function(x){return monthLabel(x.mk)+'（勤務'+x.work+'日）';}).join('、'));
+  if(sm.kibou) lines.push('・希望休、有休、希望シフト：'+sm.kibou+'件');
+  if(sm.locks) lines.push('・ロック：'+sm.locks+'件');
+  if(sm.units) lines.push('・勤務先の記録：'+sm.units+'件');
+  var shortTotal=0;
+  Object.keys(shortages).forEach(function(mk){shortTotal+=shortages[mk].length;});
+  var msg='職員「'+target.name+'」（'+target.unit+'）を削除しますか？\n'
+    +(sameName>1?'\n⚠ 同じ氏名の職員が'+sameName+'名います。職員ID '+id+' の方が対象です。\n':'')
+    +(lines.length?'\nこの職員の次のデータも削除されます。\n'+lines.join('\n')+'\n'
+                  :'\nこの職員に登録されているデータはありません。\n')
+    +(shortTotal?'\n⚠ 削除すると担当がいなくなる勤務が'+shortTotal+'日分あります（勤務表の警告に追加されます）。\n':'')
+    +'\nほかの職員のデータは変更しません。';
+  if(!confirm(msg)) return;   // キャンセル時は一切変更しない
+  staffDelState={id:id,label:target.name,unit:target.unit,done:false,resultHtml:''};
+  staffDeleteExecute(snap);
 }
+// 削除の確認は confirm() で行うため、このパネルは結果表示のみに使う
 function renderStaffDeletePanel(){
   var panel=document.getElementById('staffOpPanel'),st=staffDelState;
   if(!panel) return;
   if(!st){panel.innerHTML='';return;}
+  if(!st.done){panel.innerHTML='';return;}
   var sm=st.summary,shortTotal=0;
   var shortRows=Object.keys(st.shortages).map(function(mk){
     var byShift={};st.shortages[mk].forEach(function(w){var k=w.unit+'の'+w.shift;byShift[k]=(byShift[k]||0)+1;});
@@ -4556,11 +4576,11 @@ function opResultHtml(r,okText,preFileName){
 }
 function staffDeleteBackup(){if(staffDelState) opBackup('staffDel','shift_pre_delete_backup_',staffDelState,renderStaffDeletePanel);}
 function staffDeleteCancel(){staffDelState=null;renderStaffDeletePanel();}
-function staffDeleteExecute(){
+function staffDeleteExecute(baseSnap){
   var st=staffDelState;
-  if(!st||st.done||!st.preBackup||!opChecked('staffDel')||!isIdMode()) return;
-  if(!confirm('職員「'+st.label+'」（'+st.unit+'）と、その職員の希望休・勤務表・ロック・勤務先のデータを削除します。\n\n本当に削除しますか？')) return;
-  var r=runStorageTransaction(st.preBackup.snapshot,function(cur){
+  if(!st||st.done||!isIdMode()) return;
+  var expected=baseSnap||readShiftToolStorage();
+  var r=runStorageTransaction(expected,function(cur){
     var D=parseIdData(cur.values);
     var target=D.staff.staff.filter(function(s){return s.id===st.id;})[0];
     if(!target) return {error:'対象の職員が見つかりません'};
@@ -4599,12 +4619,38 @@ function staffDeleteExecute(){
     });
     return bad;
   });
-  if(r.status==='aborted'){st.preBackup=null;renderStaffDeletePanel();var p=document.getElementById('staffOpPanel');if(p)p.innerHTML+='<div style="color:#A32D2D;font-weight:500;margin-bottom:10px">❌ '+escHtml(r.message)+'</div>';return;}
-  if(r.status==='success') reloadStateAfterRestore();
-  st.done=true;
-  st.resultHtml=opResultHtml(r,'職員を削除しました（ほかの職員のデータが変わっていないことを確認しました）',st.preBackup.fileName)
-    +(r.status==='success'?'<div style="margin-top:8px"><button class="btn btn-sm" onclick="staffDeleteCancel()">閉じる</button></div>':'');
-  renderStaffDeletePanel();
+  var panel=document.getElementById('staffOpPanel');
+  if(r.status==='aborted'){
+    staffDelState=null;
+    if(panel) panel.innerHTML='<div class="form-card" style="font-size:13px;border-color:#e0a0a0;color:#A32D2D">'
+      +'❌ 削除を中止しました。データは変更していません。<div style="color:#333;margin-top:4px">'+escHtml(r.message)+'</div>'
+      +'<div style="margin-top:8px"><button class="btn btn-sm" onclick="staffDeleteCancel()">閉じる</button></div></div>';
+    return;
+  }
+  if(r.status==='success'){
+    // 職員一覧と人数をすぐ更新する。勤務表は再生成せず、今のデータのまま警告だけ出し直す
+    reloadStateAfterRestore();
+    try{renderStaffTabs();}catch(e){}
+    try{renderCal();}catch(e){}
+    try{
+      var key=shiftYear+'-'+(shiftMonth+1);
+      if(generatedShift[key]) renderShiftTable(generatedShift[key],shiftYear,shiftMonth);
+      else ['btnExportCSV','btnExportXLSX','btnClearShift'].forEach(function(id){
+        var b=document.getElementById(id); if(b) b.style.display='none';
+      });
+    }catch(e){}
+  }
+  staffDelState=null;
+  if(panel){
+    panel.innerHTML=r.status==='success'
+      ? '<div class="form-card" style="font-size:13px;border-color:#cfe0bd;background:#f6faf2">'
+        +'<div style="color:#1B6B45;font-weight:600">✅ 「'+escHtml(st.label)+'」を削除しました（職員'+staff.length+'名）</div>'
+        +'<div style="margin-top:4px;font-size:12px;color:#555">ほかの職員の勤務・希望休・ロック・勤務先が変わっていないことを確認しました。</div>'
+        +'<div style="margin-top:8px"><button class="btn btn-sm" onclick="staffDeleteCancel()">閉じる</button></div></div>'
+      : '<div class="form-card" style="font-size:13px;border-color:#e0a0a0">'
+        +opResultHtml(r,'','')
+        +'<div style="margin-top:8px"><button class="btn btn-sm" onclick="staffDeleteCancel()">閉じる</button></div></div>';
+  }
 }
 
 /* ---------- 試作データ（月）のリセット ---------- */
