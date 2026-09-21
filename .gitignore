@@ -1,0 +1,20 @@
+# ===== 許可リスト方式 =====
+# 既定ですべて除外し、公開する3ファイルだけを許可する。
+# 実名・勤務データ・JSON・バックアップ・Excelを誤って含めないための保険。
+
+*
+
+!index.html
+!README.md
+!.gitignore
+
+# 念のため、万一上の許可をすり抜けても除外する
+*.json
+*.xlsx
+*.xls
+*.csv
+*.jpg
+*.jpeg
+*.png
+*_backup_*
+*.before_*
